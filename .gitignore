@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-electron/
+release/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# IDE / 工具
+.mimocode/
+.vscode/
+.idea/
+.workbuddy
+
+# 系统文件与日志
+.DS_Store
+*.log
+pnpm-debug.log*
