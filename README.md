@@ -6,6 +6,8 @@
 
 ## 功能特性
 
+![docs/img-home](docs/img-home.png)
+
 ### 连接与资产
 
 - **访问密钥登录**：通过 JumpServer URL、KeyID、SecretID 调用 `/api/v1/users/profile/` 完成验证并获取用户信息。
