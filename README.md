@@ -4,6 +4,11 @@
 
 > 本项目只为了方便 SSH 操作，不能连接其他类型的 JumpServer 资产（仅支持 `platform_type` 为 `linux` 的资产）。
 
+> 本项目只在该版本 JumpServer 下进行测试，其余版本无法保证可用  
+> 产品:	JumpServer 社区版 GPLv3  
+> 版本:	v3.10.21  
+
+
 ## 功能特性
 
 ![docs/img-home](docs/img-home.png)
