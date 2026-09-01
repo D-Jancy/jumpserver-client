@@ -1,7 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use async_ssh2_russh::{AsyncChannel, NoCheckHandler, ReadStream};
+use async_ssh2_russh::{russh::Disconnect, AsyncChannel, NoCheckHandler, ReadStream};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -115,6 +115,8 @@ async fn jms_request(
 struct SshConnection {
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u32, u32)>,
+    // 保存 russh 会话句柄，断开时显式发送 disconnect，避免 socket 泄漏
+    handle: async_ssh2_russh::russh::client::Handle<NoCheckHandler>,
 }
 
 #[derive(Default)]
@@ -130,8 +132,23 @@ async fn send_to_tab(app: &AppHandle, tab_id: &str, channel: &str, data: &str) {
 }
 
 async fn disconnect_tab_ssh(state: &AppState, tab_id: &str) {
-    let mut conns = state.connections.lock().await;
-    conns.remove(tab_id);
+    let conn = {
+        let mut conns = state.connections.lock().await;
+        conns.remove(tab_id)
+    };
+    if let Some(conn) = conn {
+        // 先关闭写入端，让 writer task 退出
+        drop(conn.write_tx);
+        drop(conn.resize_tx);
+        // 显式断开 SSH 会话，避免 channel/handle 依赖 GC 回收导致 socket 泄漏
+        if let Err(e) = conn
+            .handle
+            .disconnect(Disconnect::ByApplication, "client closed", "en")
+            .await
+        {
+            log::warn!("[ssh] disconnect {} failed: {}", tab_id, e);
+        }
+    }
 }
 
 async fn spawn_ssh_reader(mut reader: ReadStream, app: AppHandle, tab_id: String) {
@@ -240,6 +257,7 @@ async fn connect_ssh(
     let conn = SshConnection {
         write_tx,
         resize_tx,
+        handle,
     };
 
     let mut conns = state.connections.lock().await;
@@ -413,8 +431,21 @@ async fn disconnect_ssh(state: State<'_, Arc<AppState>>, tab_id: String) -> Resu
 
 #[tauri::command]
 async fn disconnect_all_ssh(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    let mut conns = state.connections.lock().await;
-    conns.clear();
+    let conns = {
+        let mut guard = state.connections.lock().await;
+        std::mem::take(&mut *guard)
+    };
+    for (tab_id, conn) in conns {
+        drop(conn.write_tx);
+        drop(conn.resize_tx);
+        if let Err(e) = conn
+            .handle
+            .disconnect(Disconnect::ByApplication, "client closed", "en")
+            .await
+        {
+            log::warn!("[ssh] disconnect {} failed: {}", tab_id, e);
+        }
+    }
     Ok(json!({ "success": true }))
 }
 
