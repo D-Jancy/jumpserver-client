@@ -29,6 +29,19 @@ struct Asset {
 
 // ==================== JumpServer API 工具 ====================
 
+// 按字节上限截断字符串，但回退到最近的字符边界，
+// 避免在多字节字符（如中文）中间切片导致 panic（release 配置 panic=abort，会直接崩溃应用）
+fn truncate_utf8_safe(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn generate_signature(secret: &str, string_to_sign: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
@@ -107,7 +120,7 @@ async fn jms_request(
 
     let res = req.send().await.map_err(|e| format!("request error: {}", e))?;
     let text = res.text().await.map_err(|e| format!("read body error: {}", e))?;
-    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {} | {}", e, &text[..text.len().min(200)]))
+    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {} | {}", e, truncate_utf8_safe(&text, 200)))
 }
 
 // ==================== SSH 连接管理 ====================
@@ -153,18 +166,50 @@ async fn disconnect_tab_ssh(state: &AppState, tab_id: &str) {
 
 async fn spawn_ssh_reader(mut reader: ReadStream, app: AppHandle, tab_id: String) {
     let mut buf = [0u8; 4096];
+    // 保存因块边界被截断的不完整 UTF-8 尾部，与下一块拼接后再解码，
+    // 避免中文等多字节字符被 4096 字节分块切断后输出 U+FFFD 乱码
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                let _ = send_to_tab(&app, &tab_id, "terminal-data", &data).await;
+                pending.extend_from_slice(&buf[..n]);
+                match std::str::from_utf8(&pending) {
+                    Ok(s) => {
+                        let _ = send_to_tab(&app, &tab_id, "terminal-data", s).await;
+                        pending.clear();
+                    }
+                    Err(e) => {
+                        // valid_up_to 之前的字节保证为合法 UTF-8，先输出
+                        let valid = e.valid_up_to();
+                        if valid > 0 {
+                            let s = std::str::from_utf8(&pending[..valid]).unwrap_or("");
+                            let _ = send_to_tab(&app, &tab_id, "terminal-data", s).await;
+                        }
+                        match e.error_len() {
+                            // None：尾部只是不完整（被块边界切断），保留待下一块拼接
+                            None => {
+                                pending.drain(..valid);
+                            }
+                            // Some(n)：确属非法字节（非截断），丢弃并以替换符占位（与 from_utf8_lossy 行为一致）
+                            Some(bad) => {
+                                let _ = send_to_tab(&app, &tab_id, "terminal-data", "\u{FFFD}").await;
+                                pending.drain(..valid + bad);
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let _ = send_to_tab(&app, &tab_id, "terminal-data", &format!("\r\n\x1b[31m读取错误: {}\x1b[0m\r\n", e)).await;
                 break;
             }
         }
+    }
+    // 流结束时若仍有残余不完整字节，按 lossy 语义输出替换符，避免内容无声丢失
+    if !pending.is_empty() {
+        let tail = String::from_utf8_lossy(&pending).to_string();
+        let _ = send_to_tab(&app, &tab_id, "terminal-data", &tail).await;
     }
     let _ = send_to_tab(&app, &tab_id, "ssh-status", "disconnected").await;
 }
