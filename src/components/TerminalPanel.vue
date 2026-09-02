@@ -346,17 +346,17 @@ function initTerminalForTab(tabId) {
   tryFitWhenReady(tabId, fitAddon)
 }
 
-// 销毁指定 tab 的终端
+// 销毁指定 tab 的终端（即使 xterm 未初始化成功，也要清理所有映射，避免残留）
 function destroyTerminalForTab(tabId) {
   const term = terminals.value[tabId]
   if (term) {
     try { term.dispose() } catch (e) { /* ignore */ }
-    delete terminals.value[tabId]
-    delete fitAddons.value[tabId]
-    delete searchAddons.value[tabId]
-    delete searchResultsByTab[tabId]
-    delete terminalRefs.value[tabId]
   }
+  delete terminals.value[tabId]
+  delete fitAddons.value[tabId]
+  delete searchAddons.value[tabId]
+  delete searchResultsByTab[tabId]
+  delete terminalRefs.value[tabId]
 }
 
 // 连接 SSH 到指定 tab
@@ -392,8 +392,12 @@ function handleSelectTab(tabId) {
 }
 
 function handleCloseTab(tabId) {
-  // 销毁终端
+  // 断开该 tab 的 SSH 连接（TabBar 只负责 emit，关闭逻辑统一在这里收口）
+  window.electronAPI?.disconnectSSH(tabId)?.catch(() => {})
+  // 销毁 xterm 实例并清理映射，避免内存泄漏
   destroyTerminalForTab(tabId)
+  // 从 store 中移除 tab
+  appStore.closeTab(tabId)
 }
 
 // 当用户点击左侧服务器列表时调用

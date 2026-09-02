@@ -194,7 +194,6 @@
         :class="{ 'drag-over': dragOverIndex === index }"
         draggable="true"
         @click="openAsset(asset)"
-        @dblclick="openAsset(asset)"
         @dragstart="onDragStart($event, index)"
         @dragover.prevent="onDragOver($event, index)"
         @dragleave="onDragLeave"
@@ -395,7 +394,21 @@ function isAssetConnected(assetId) {
   return appStore.tabs.some(t => t.assetId === assetId && t.connected)
 }
 
+// 防止双击/快速连点同一资产时重复创建标签：
+// 双击会触发两次 click，若不加保护会开出 2~3 个 Tab 并建立多条 SSH 连接
+let lastOpenedAssetId = null
+let lastOpenedAt = 0
+const REOPEN_GUARD_MS = 400
+
 function openAsset(asset) {
+  const now = Date.now()
+  if (asset.id === lastOpenedAssetId && now - lastOpenedAt < REOPEN_GUARD_MS) {
+    // 处于连点保护窗口内：忽略本次点击，并顺延窗口起点
+    lastOpenedAt = now
+    return
+  }
+  lastOpenedAssetId = asset.id
+  lastOpenedAt = now
   emit('openAsset', asset)
 }
 
