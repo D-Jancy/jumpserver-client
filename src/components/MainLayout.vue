@@ -38,8 +38,8 @@ onMounted(async () => {
   }
 })
 
-function onOpenAsset(asset) {
-  terminalPanelRef.value?.openAssetTab(asset)
+function onOpenAsset(asset, command) {
+  terminalPanelRef.value?.openAssetTab(asset, command)
 }
 
 function startResize(e) {
