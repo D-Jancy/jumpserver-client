@@ -196,7 +196,3 @@ pnpm build:win
 - Windows：`JumpServerClient_<version>_x64-setup.exe`
 
 也可在 Actions 页面手动触发（`workflow_dispatch`）。
-
-## 许可证
-
-MIT
