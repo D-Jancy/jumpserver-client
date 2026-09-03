@@ -632,7 +632,12 @@ pub fn run() {
             // 让服务端立即清理会话而不是等待 TCP 超时（与 README 描述一致）
             if let tauri::RunEvent::Exit = event {
                 let state = app_handle.state::<Arc<AppState>>();
-                tauri::async_runtime::block_on(disconnect_all_sessions(&state));
+                tauri::async_runtime::block_on(async {
+                    disconnect_all_sessions(&state).await;
+                    // russh 的 disconnect() 仅将断开消息入队，实际 DISCONNECT 包由各会话事件循环异步发出；
+                    // 回调返回后进程随即退出，这里留一小段时间让事件循环完成 flush，否则断开可能来不及送达
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                });
             }
         });
 }
