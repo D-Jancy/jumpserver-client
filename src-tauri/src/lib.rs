@@ -11,7 +11,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
@@ -28,6 +28,19 @@ struct Asset {
 }
 
 // ==================== JumpServer API 工具 ====================
+
+// 按字节上限截断字符串，但回退到最近的字符边界，
+// 避免在多字节字符（如中文）中间切片导致 panic（release 配置 panic=abort，会直接崩溃应用）
+fn truncate_utf8_safe(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 fn generate_signature(secret: &str, string_to_sign: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
@@ -92,6 +105,9 @@ async fn jms_request(
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        // 网络不可达时快速失败，避免 UI 无限等待
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("reqwest build error: {}", e))?;
 
@@ -106,8 +122,13 @@ async fn jms_request(
     }
 
     let res = req.send().await.map_err(|e| format!("request error: {}", e))?;
+    let status = res.status();
     let text = res.text().await.map_err(|e| format!("read body error: {}", e))?;
-    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {} | {}", e, &text[..text.len().min(200)]))
+    // 非 2xx（如 401 密钥错误、500 服务端异常）直接给出明确错误，而非误导性的 JSON parse error
+    if !status.is_success() {
+        return Err(format!("JumpServer API 返回 {}：{}", status.as_u16(), truncate_utf8_safe(&text, 200)));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {} | {}", e, truncate_utf8_safe(&text, 200)))
 }
 
 // ==================== SSH 连接管理 ====================
@@ -131,6 +152,7 @@ async fn send_to_tab(app: &AppHandle, tab_id: &str, channel: &str, data: &str) {
     );
 }
 
+// 移除并显式断开指定 tab 的 SSH 会话（幂等；读写任务退出时的兜底清理也复用此函数）
 async fn disconnect_tab_ssh(state: &AppState, tab_id: &str) {
     let conn = {
         let mut conns = state.connections.lock().await;
@@ -151,14 +173,46 @@ async fn disconnect_tab_ssh(state: &AppState, tab_id: &str) {
     }
 }
 
-async fn spawn_ssh_reader(mut reader: ReadStream, app: AppHandle, tab_id: String) {
+async fn spawn_ssh_reader(
+    mut reader: ReadStream,
+    state: Arc<AppState>,
+    app: AppHandle,
+    tab_id: String,
+) {
     let mut buf = [0u8; 4096];
+    // 保存因块边界被截断的不完整 UTF-8 尾部，与下一块拼接后再解码，
+    // 避免中文等多字节字符被 4096 字节分块切断后输出 U+FFFD 乱码
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                let _ = send_to_tab(&app, &tab_id, "terminal-data", &data).await;
+                pending.extend_from_slice(&buf[..n]);
+                match std::str::from_utf8(&pending) {
+                    Ok(s) => {
+                        let _ = send_to_tab(&app, &tab_id, "terminal-data", s).await;
+                        pending.clear();
+                    }
+                    Err(e) => {
+                        // valid_up_to 之前的字节保证为合法 UTF-8，先输出
+                        let valid = e.valid_up_to();
+                        if valid > 0 {
+                            let s = std::str::from_utf8(&pending[..valid]).unwrap_or("");
+                            let _ = send_to_tab(&app, &tab_id, "terminal-data", s).await;
+                        }
+                        match e.error_len() {
+                            // None：尾部只是不完整（被块边界切断），保留待下一块拼接
+                            None => {
+                                pending.drain(..valid);
+                            }
+                            // Some(n)：确属非法字节（非截断），丢弃并以替换符占位（与 from_utf8_lossy 行为一致）
+                            Some(bad) => {
+                                let _ = send_to_tab(&app, &tab_id, "terminal-data", "\u{FFFD}").await;
+                                pending.drain(..valid + bad);
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let _ = send_to_tab(&app, &tab_id, "terminal-data", &format!("\r\n\x1b[31m读取错误: {}\x1b[0m\r\n", e)).await;
@@ -166,11 +220,19 @@ async fn spawn_ssh_reader(mut reader: ReadStream, app: AppHandle, tab_id: String
             }
         }
     }
+    // 流结束时若仍有残余不完整字节，按 lossy 语义输出替换符，避免内容无声丢失
+    if !pending.is_empty() {
+        let tail = String::from_utf8_lossy(&pending).to_string();
+        let _ = send_to_tab(&app, &tab_id, "terminal-data", &tail).await;
+    }
     let _ = send_to_tab(&app, &tab_id, "ssh-status", "disconnected").await;
+    // 读流结束（EOF/错误）意味着会话已终止：清理连接表并显式断开，防止连接残留
+    disconnect_tab_ssh(&state, &tab_id).await;
 }
 
 async fn spawn_ssh_writer(
     channel: AsyncChannel,
+    state: Arc<AppState>,
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut resize_rx: mpsc::UnboundedReceiver<(u32, u32)>,
     app: AppHandle,
@@ -204,10 +266,13 @@ async fn spawn_ssh_writer(
             }
         }
     }
+    // writer 退出后连接表中的记录已无人消费，清理并断开，
+    // 防止 terminal_input 继续向死 channel 无限堆积（幂等：主动关闭场景下为 no-op）
+    disconnect_tab_ssh(&state, &tab_id).await;
 }
 
 async fn connect_ssh(
-    state: &AppState,
+    state: &Arc<AppState>,
     app: AppHandle,
     tab_id: &str,
     host: &str,
@@ -222,11 +287,58 @@ async fn connect_ssh(
 
     let addr = format!("{}:{}", host, port);
 
-    let config = Arc::new(async_ssh2_russh::russh::client::Config::default());
+    // 定期 keepalive：防止 NAT/防火墙静默断链或服务端超时踢掉空闲会话；
+    // keepalive 失败会终止会话并触发 reader EOF 清理链路，前端状态点同步变灰
+    let config = Arc::new(async_ssh2_russh::russh::client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
     let mut handle = async_ssh2_russh::russh::client::connect(config, addr, NoCheckHandler)
         .await
         .map_err(|e| format!("SSH connect error: {}", e))?;
 
+    let channel = match authenticate_and_open_shell(&mut handle, username, password, cols, rows).await {
+        Ok(c) => c,
+        Err(e) => {
+            // 认证/建链失败时显式断开会话，避免 socket 泄漏
+            let _ = handle
+                .disconnect(Disconnect::ByApplication, "setup failed", "en")
+                .await;
+            return Err(e);
+        }
+    };
+
+    // 必须在 shell 之前获取 stdout，否则可能收不到数据
+    let stdout = channel.stdout();
+    let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
+
+    let conn = SshConnection {
+        write_tx,
+        resize_tx,
+        handle,
+    };
+
+    let mut conns = state.connections.lock().await;
+    conns.insert(tab_id.to_string(), conn);
+    drop(conns);
+
+    // 启动读写任务；任务退出时自行兜底清理连接表（幂等）
+    tokio::spawn(spawn_ssh_reader(stdout, state.clone(), app.clone(), tab_id.to_string()));
+    tokio::spawn(spawn_ssh_writer(channel, state.clone(), write_rx, resize_rx, app.clone(), tab_id.to_string()));
+
+    let _ = send_to_tab(&app, tab_id, "ssh-status", "connected").await;
+    Ok(())
+}
+
+// 完成认证并打开 shell 通道；任一步失败由调用方负责显式断开会话
+async fn authenticate_and_open_shell(
+    handle: &mut async_ssh2_russh::russh::client::Handle<NoCheckHandler>,
+    username: &str,
+    password: &str,
+    cols: u32,
+    rows: u32,
+) -> Result<AsyncChannel, String> {
     let auth = handle
         .authenticate_password(username, password)
         .await
@@ -248,28 +360,7 @@ async fn connect_ssh(
         .request_shell(true)
         .await
         .map_err(|e| format!("SSH shell error: {}", e))?;
-
-    // 必须在 shell 之前获取 stdout，否则可能收不到数据
-    let stdout = channel.stdout();
-    let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
-
-    let conn = SshConnection {
-        write_tx,
-        resize_tx,
-        handle,
-    };
-
-    let mut conns = state.connections.lock().await;
-    conns.insert(tab_id.to_string(), conn);
-    drop(conns);
-
-    // 启动读写任务
-    tokio::spawn(spawn_ssh_reader(stdout, app.clone(), tab_id.to_string()));
-    tokio::spawn(spawn_ssh_writer(channel, write_rx, resize_rx, app.clone(), tab_id.to_string()));
-
-    let _ = send_to_tab(&app, tab_id, "ssh-status", "connected").await;
-    Ok(())
+    Ok(channel)
 }
 
 // ==================== Tauri 命令 ====================
@@ -431,6 +522,12 @@ async fn disconnect_ssh(state: State<'_, Arc<AppState>>, tab_id: String) -> Resu
 
 #[tauri::command]
 async fn disconnect_all_ssh(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    disconnect_all_sessions(&state).await;
+    Ok(json!({ "success": true }))
+}
+
+// 断开所有 SSH 会话并清空连接表（应用退出 / 主动断开时调用）
+async fn disconnect_all_sessions(state: &AppState) {
     let conns = {
         let mut guard = state.connections.lock().await;
         std::mem::take(&mut *guard)
@@ -446,7 +543,6 @@ async fn disconnect_all_ssh(state: State<'_, Arc<AppState>>) -> Result<Value, St
             log::warn!("[ssh] disconnect {} failed: {}", tab_id, e);
         }
     }
-    Ok(json!({ "success": true }))
 }
 
 #[tauri::command]
@@ -534,6 +630,32 @@ pub fn run() {
             get_settings,
             save_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                // 应用退出前显式断开所有 SSH 会话，
+                // 让服务端立即清理会话而不是等待 TCP 超时（与 README 描述一致）
+                tauri::RunEvent::Exit => {
+                    let state = app_handle.state::<Arc<AppState>>();
+                    tauri::async_runtime::block_on(async {
+                        disconnect_all_sessions(&state).await;
+                        // russh 的 disconnect() 仅将断开消息入队，实际 DISCONNECT 包由各会话事件循环异步发出；
+                        // 回调返回后进程随即退出，这里留一小段时间让事件循环完成 flush，否则断开可能来不及送达
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    });
+                }
+                // macOS 关闭窗口后应用仍驻留：点击 Dock 图标时恢复主窗口，避免用户误以为应用已退出
+                // （has_visible_windows 为 true 时由 macOS 默认行为处理，无需干预）
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+                _ => {}
+            }
+        });
 }

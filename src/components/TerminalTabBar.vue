@@ -80,7 +80,7 @@ import { useAppStore } from '../stores/app'
 
 const appStore = useAppStore()
 
-const emit = defineEmits(['select-tab', 'close-tab', 'new-tab'])
+const emit = defineEmits(['select-tab', 'close-tab'])
 
 const tabBarRef = ref(null)
 const tabStripRef = ref(null)
@@ -99,9 +99,9 @@ function selectTab(tabId) {
 }
 
 function closeTab(tabId) {
-  // 断开该 tab 的 SSH
-  window.electronAPI.disconnectSSH(tabId)
-  appStore.closeTab(tabId)
+  // 交给 TerminalPanel 统一处理：断开 SSH、销毁 xterm 实例、移除 tab
+  // （此前在这里直接操作 store，导致 TerminalPanel 无机会 dispose 终端，造成内存泄漏）
+  emit('close-tab', tabId)
 }
 
 function onWheel(e) {
