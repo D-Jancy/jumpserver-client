@@ -60,7 +60,7 @@
 ### 其他
 
 - **设置持久化**：登录信息、用户信息、资产标签、资产排序、侧边栏宽度、主题、终端配色方案、快捷指令全部保存到本地 `~/.jumpserverclient/settings.json`。
-- **跨平台打包**：支持 macOS（arm64 DMG）与 Windows（x64 NSIS 安装包），并提供 GitHub Actions 自动构建发布。
+- **跨平台打包**：支持 macOS（Apple Silicon arm64 / Intel x64 DMG）与 Windows（x64 NSIS 安装包），并提供 GitHub Actions 自动构建发布。
 - **Web 链接可点击**：通过 `WebLinksAddon` 让终端中的 URL 可直接点击打开。
 - **Unicode 11**：加载 `Unicode11Addon` 以正确处理宽字符与 emoji 宽度。
 - **终端自适应**：基于 xterm.js + FitAddon，窗口 resize 或侧边栏拖动时通过 `ResizeObserver` 防抖后自动 fit，并将新尺寸同步到远端 PTY，避免乱码。
@@ -81,6 +81,7 @@
 ├── build/                        # 图标源资源
 ├── docs/                         # 图标源文件等
 ├── scripts/                      # 打包辅助脚本
+│   ├── mac-arch.mjs              # macOS 架构探测与 .app 路径解析
 │   ├── build-dmg.mjs             # 生成 DMG 并复制到 release/
 │   ├── fix-mac-icon.mjs          # 修复 macOS 应用图标
 │   └── move-app.mjs              # 移动 .app 到 release/
@@ -119,6 +120,7 @@
 - Node.js 18+
 - pnpm 8+
 - Rust 1.77.2+（`rust-toolchain` 稳定通道）
+- 打包 Intel DMG 需要 Rust target `x86_64-apple-darwin`（`pnpm build:mac:intel` 会自动安装）
 
 ## 安装依赖
 
@@ -147,8 +149,14 @@ pnpm build
 ### 打包安装包
 
 ```bash
-# macOS（输出 .app + .dmg，arm64）
+# macOS（输出当前芯片架构的 .app + .dmg）
 pnpm build:mac
+# Apple Silicon
+pnpm build:mac:arm
+# Intel
+pnpm build:mac:intel
+# 同时构建 arm64 与 Intel
+pnpm build:mac:all
 # 或仅生成 .app（含图标修复并复制到 release/）
 pnpm build:onlyapp
 
@@ -156,7 +164,7 @@ pnpm build:onlyapp
 pnpm build:win
 ```
 
-打包产物位于 `src-tauri/target/release/bundle/`，`build:mac` / `build:onlyapp` 还会额外复制到项目根目录的 `release/`。
+当前架构产物位于 `src-tauri/target/release/bundle/`，指定架构时位于 `src-tauri/target/<rust-target>/release/bundle/`。`build:mac*` / `build:onlyapp` 还会额外复制到项目根目录的 `release/`。
 
 ### npm scripts 说明
 
@@ -167,7 +175,10 @@ pnpm build:win
 | `pnpm build` | 仅构建前端到 `dist/` |
 | `pnpm tauri:build` | Tauri 完整打包（使用 `tauri.conf.json` 中的 targets） |
 | `pnpm build:onlyapp` | 仅打包 macOS `.app` 并修复图标、复制到 `release/` |
-| `pnpm build:mac` | 打包 macOS `.app` + `.dmg`（含图标修复） |
+| `pnpm build:mac` | 打包当前芯片架构的 macOS `.app` + `.dmg`（含图标修复） |
+| `pnpm build:mac:arm` | 打包 Apple Silicon（arm64）DMG |
+| `pnpm build:mac:intel` | 打包 Intel（x64）DMG，可在 Apple Silicon 上交叉编译 |
+| `pnpm build:mac:all` | 依次打包 arm64 与 Intel DMG |
 | `pnpm build:win` | 原生编译 Windows NSIS 安装包（需在 Windows 主机运行） |
 | `pnpm build:dmg` | 仅执行 DMG 打包脚本（需先有 `.app`） |
 
@@ -192,8 +203,8 @@ pnpm build:win
 
 推送到 `v*` 标签时会触发 `.github/workflows/build.yml`，分别在 macOS 和 Windows 构建产物并自动创建 GitHub Release，包含：
 
-- macOS：`JumpServerClient_<version>_aarch64.dmg`
+- macOS Apple Silicon：`JumpServerClient_<version>_aarch64.dmg`
+- macOS Intel：`JumpServerClient_<version>_x64.dmg`
 - Windows：`JumpServerClient_<version>_x64-setup.exe`
 
 也可在 Actions 页面手动触发（`workflow_dispatch`）。
-

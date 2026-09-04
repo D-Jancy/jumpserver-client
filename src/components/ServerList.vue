@@ -454,6 +454,12 @@ function expandRootNodes(flat) {
   expandedIds.value = next
 }
 
+// 防止双击/快速连点同一资产时重复创建标签：
+// 树节点同时绑定 click 与 dblclick，若不加保护会开出多个 Tab 并建立多条 SSH 连接
+let lastOpenedAssetId = null
+let lastOpenedAt = 0
+const REOPEN_GUARD_MS = 400
+
 function openTreeAsset(node) {
   const asset = appStore.assets.find(a => a.id === node.assetId) || {
     id: node.assetId,
@@ -461,6 +467,13 @@ function openTreeAsset(node) {
     address: node.address,
     platform_type: 'linux'
   }
+  const now = Date.now()
+  if (asset.id === lastOpenedAssetId && now - lastOpenedAt < REOPEN_GUARD_MS) {
+    lastOpenedAt = now
+    return
+  }
+  lastOpenedAssetId = asset.id
+  lastOpenedAt = now
   emit('openAsset', asset)
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "JumpServerClient",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "JumpServer SSH 客户端工具",
   "type": "module",
   "scripts": {
@@ -9,9 +9,13 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "icons": "node scripts/generate-icons.mjs",
     "build:dmg": "node scripts/build-dmg.mjs",
     "build:onlyapp": "tauri build --bundles app && node scripts/fix-mac-icon.mjs && node scripts/move-app.mjs",
     "build:mac": "tauri build --bundles app && node scripts/build-dmg.mjs",
+    "build:mac:arm": "rustup target add aarch64-apple-darwin && tauri build --target aarch64-apple-darwin --bundles app && node scripts/build-dmg.mjs --target aarch64-apple-darwin",
+    "build:mac:intel": "rustup target add x86_64-apple-darwin && tauri build --target x86_64-apple-darwin --bundles app && node scripts/build-dmg.mjs --target x86_64-apple-darwin",
+    "build:mac:all": "pnpm build:mac:arm && pnpm build:mac:intel",
     "build:win": "tauri build --bundles nsis",
     "preview": "vite preview"
   },

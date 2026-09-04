@@ -8,59 +8,70 @@ on:
 
 jobs:
   build-macos:
+    name: macOS (${{ matrix.target }})
     runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '10.13'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            artifact: macOS-DMG-aarch64
+          - target: x86_64-apple-darwin
+            artifact: macOS-DMG-x64
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          
+
       - name: Install pnpm
         run: npm install -g pnpm
-        
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
-          
+          targets: ${{ matrix.target }}
+
       - name: Install dependencies
         run: pnpm install
-        
+
       - name: Build macOS DMG
-        run: pnpm tauri build --bundles dmg
-        
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles dmg
+
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: macOS-DMG
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          name: ${{ matrix.artifact }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
 
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          
+
       - name: Install pnpm
         run: npm install -g pnpm
-        
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-          
+
       - name: Install dependencies
         run: pnpm install
-        
+
       - name: Build Windows Installer
         run: pnpm tauri build --bundles nsis
-        
+
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
@@ -76,12 +87,13 @@ jobs:
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
-        
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            macOS-DMG/*.dmg
+            macOS-DMG-aarch64/*.dmg
+            macOS-DMG-x64/*.dmg
             Windows-Installer/*.exe
           draft: false
           prerelease: false
