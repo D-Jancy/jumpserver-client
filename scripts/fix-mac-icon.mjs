@@ -3,11 +3,14 @@
  * macOS 图标修复脚本
  *
  * 问题：Tauri 2.x 默认不生成 Asset Catalog，Info.plist 缺 CFBundleIconName，
- *       导致 macOS 11+ Launchpad 里图标偏大。
+ *       导致 macOS 11+ Launchpad / Dock 里图标偏大。
  *
  * 修复：
  *   路径 A（需要完整 Xcode）：actool 编译 Assets.car + 注入 CFBundleIconName
  *   路径 B（仅 Command Line Tools）：iconutil 重生成 .icns + 注入 CFBundleIconName
+ *
+ * 源图 build/icon-1024.png 已按 Apple 824/1024 安全区留出透明边，
+ * 并去掉白色底板。此处不再铺白底，以免 Dock 里再次变成大方块。
  *
  * 用法：node scripts/fix-mac-icon.mjs [appPath]
  *   不传 appPath 时自动查找 src-tauri/target/release/bundle/macos/*.app
@@ -75,9 +78,10 @@ function runInherit(cmd) {
   execSync(cmd, { stdio: 'inherit' })
 }
 
-function hasTool(name) {
+function hasWorkingActool() {
   try {
-    execSync(`which ${name}`, { stdio: 'pipe', encoding: 'utf8' })
+    execSync('xcrun --find actool', { stdio: 'pipe' })
+    execSync('xcrun actool --version', { stdio: 'pipe' })
     return true
   } catch {
     return false
@@ -100,57 +104,13 @@ function plistSet(key, value) {
   }
 }
 
-// ---- Step 1: 去除源图透明度（铺白底）----
+// ---- Step 1: 使用带透明背景的源图（不再铺白底）----
 const tmpDir = path.join('/tmp', `mac-icon-fix-${Date.now()}`)
 mkdirSync(tmpDir, { recursive: true })
 
-const opaqueIcon = path.join(tmpDir, 'icon-opaque-1024.png')
-console.log('🎨 去除图标透明度...')
-
-// 方案 1: 用 Python PIL 去除透明度（铺白底）
-let alphaRemoved = false
-try {
-  const pythonScript = `
-from PIL import Image
-img = Image.open('${sourceIcon}').convert('RGBA')
-bg = Image.new('RGBA', img.size, (255, 255, 255, 255))
-bg.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)
-bg.convert('RGB').save('${opaqueIcon}', 'PNG')
-print('OK')
-`
-  const result = execSync(`python3 -c "${pythonScript.replace(/"/g, '\\"')}"`, {
-    encoding: 'utf8', stdio: 'pipe'
-  }).trim()
-  if (result === 'OK' && existsSync(opaqueIcon)) {
-    alphaRemoved = true
-    console.log('  (PIL 去除透明度成功)')
-  }
-} catch {
-  // PIL 不可用
-}
-
-// 方案 2: 用 sips 去除透明度（不同写法）
-if (!alphaRemoved) {
-  try {
-    // sips 没有 hasAlpha，用 format png + flatten 的替代方式
-    // 先转 jpeg 去掉 alpha，再转回 png
-    const tmpJpg = path.join(tmpDir, 'tmp.jpg')
-    execSync(`sips -s format jpeg "${sourceIcon}" --out "${tmpJpg}"`, { stdio: 'pipe' })
-    execSync(`sips -s format png "${tmpJpg}" --out "${opaqueIcon}"`, { stdio: 'pipe' })
-    if (existsSync(opaqueIcon)) {
-      alphaRemoved = true
-      console.log('  (sips jpeg 中转去除透明度成功)')
-    }
-  } catch {
-    // sips 方式也失败
-  }
-}
-
-// 方案 3: 直接用原图（可能有透明度，但 iconutil 仍能处理）
-if (!alphaRemoved) {
-  console.log('  ⚠️ 无法去除透明度，使用原始图标')
-  copyFileSync(sourceIcon, opaqueIcon)
-}
+const masterIcon = path.join(tmpDir, 'icon-1024.png')
+copyFileSync(sourceIcon, masterIcon)
+console.log('🎨 保留透明背景（不铺白底）')
 
 // ---- Step 2: 生成 iconset ----
 const iconsetDir = path.join(tmpDir, 'AppIcon.iconset')
@@ -171,11 +131,11 @@ const sizes = [
 ]
 
 for (const [name, size] of sizes) {
-  runInherit(`sips -z ${size} ${size} "${opaqueIcon}" --out "${path.join(iconsetDir, name)}"`)
+  runInherit(`sips -z ${size} ${size} "${masterIcon}" --out "${path.join(iconsetDir, name)}"`)
 }
 
 // ---- Step 3: 检查是否有 actool（完整 Xcode）----
-const hasActool = hasTool('actool')
+const hasActool = hasWorkingActool()
 
 if (hasActool) {
   console.log('✅ 检测到 actool（完整 Xcode），走路径 A：编译 Assets.car')
