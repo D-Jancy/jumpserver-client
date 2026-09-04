@@ -5,7 +5,7 @@
       <div class="search-box">
         <n-input
           v-model:value="searchQuery"
-          placeholder="搜索服务器..."
+          placeholder="搜索名称 / IP / 节点..."
           clearable
           size="small"
           :input-props="{ autocomplete: 'off' }"
@@ -183,67 +183,19 @@
 
     <!-- 服务器列表 -->
     <div v-else class="list-body" ref="listBodyRef">
-      <div v-if="filteredAssets.length === 0 && !loading" class="empty-state">
+      <div v-if="visibleTree.length === 0 && !loading" class="empty-state">
         <p>暂无 Linux 服务器</p>
       </div>
 
-      <div
-        v-for="(asset, index) in filteredAssets"
-        :key="asset.id"
-        class="asset-item"
-        :class="{ 'drag-over': dragOverIndex === index }"
-        draggable="true"
-        @click="openAsset(asset)"
-        @dblclick="openAsset(asset)"
-        @dragstart="onDragStart($event, index)"
-        @dragover.prevent="onDragOver($event, index)"
-        @dragleave="onDragLeave"
-        @drop="onDrop($event, index)"
-        @dragend="onDragEnd"
-      >
-        <!-- 连接状态指示 -->
-        <span class="asset-status" :class="{ connected: isAssetConnected(asset.id) }"></span>
-
-        <div class="asset-info">
-          <div class="asset-title">
-            <!-- <svg width="14" height="14" viewBox="0 0 14 14" fill="none" class="asset-icon">
-              <rect x="1.5" y="2.5" width="11" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
-              <rect x="3" y="5" width="8" height="1.5" rx="0.5" fill="currentColor" opacity="0.3"/>
-              <rect x="3" y="7.5" width="5" height="1" rx="0.5" fill="currentColor" opacity="0.2"/>
-            </svg> -->
-            <span>{{ asset.title }}</span>
-          </div>
-          <!-- <div class="asset-address">{{ asset.address || '无地址信息' }}</div> -->
-        </div>
-
-        <div class="asset-action">
-          <n-button
-            text
-            size="tiny"
-            @click.stop="showTagInput(asset)"
-            title="添加标签"
-          >
-            <template #icon>
-              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                <path d="M2 2h4l3 3-5 5L2 8V2z" stroke="currentColor" stroke-width="1" fill="none"/>
-                <circle cx="8.5" cy="4.5" r="0.8" fill="currentColor"/>
-              </svg>
-            </template>
-          </n-button>
-        </div>
-
-        <!-- 标签 -->
-        <div v-if="appStore.getAssetTags(asset.id).length > 0" class="asset-tags">
-          <span
-            v-for="tag in appStore.getAssetTags(asset.id)"
-            :key="tag"
-            class="tag-chip"
-          >
-            {{ tag }}
-            <span class="close-btn" @click.stop="appStore.removeTag(asset.id, tag)">&times;</span>
-          </span>
-        </div>
-      </div>
+      <AssetTree
+        v-else
+        :nodes="visibleTree"
+        :expanded-ids="expandedIds"
+        :force-expand="isSearching"
+        @toggle="toggleNode"
+        @open-asset="openTreeAsset"
+        @add-tag="showTagInput"
+      />
     </div>
 
     <!-- 添加标签弹窗 -->
@@ -301,6 +253,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import AssetTree from './AssetTree.vue'
 import { NInput, NButton, NSpin, NModal, NForm, NFormItem, NSelect, NPopover, useMessage } from 'naive-ui'
 import { useAppStore } from '../stores/app'
 import { getAllColorSchemes, getColorScheme } from '../styles/terminal-color-schemes'
@@ -313,10 +266,7 @@ const searchQuery = ref('')
 const loading = ref(true)
 const errorMsg = ref('')
 const listBodyRef = ref(null)
-
-// 拖拽状态
-const dragIndex = ref(-1)
-const dragOverIndex = ref(-1)
+const expandedIds = ref({})
 
 // 标签弹窗
 const showTagModal = ref(false)
@@ -378,24 +328,139 @@ function toggleTheme() {
   appStore.setTheme(appStore.theme === 'dark' ? 'light' : 'dark')
 }
 
-const filteredAssets = computed(() => {
-  let list = appStore.getOrderedAssets()
-  if (!searchQuery.value.trim()) return list
-
-  const query = searchQuery.value.trim().toLowerCase()
-  return list.filter(a => {
-    const title = (a.title || '').toLowerCase()
-    const address = (a.address || '').toLowerCase()
-    const tags = appStore.getAssetTags(a.id).join(' ').toLowerCase()
-    return title.includes(query) || address.includes(query) || tags.includes(query)
-  })
-})
-
-function isAssetConnected(assetId) {
-  return appStore.tabs.some(t => t.assetId === assetId && t.connected)
+function countAssets(nodes) {
+  let count = 0
+  for (const node of nodes) {
+    if (node.type === 'asset') count += 1
+    else count += countAssets(node.children || [])
+  }
+  return count
 }
 
-function openAsset(asset) {
+function pruneEmpty(nodes) {
+  const result = []
+  for (const node of nodes) {
+    if (node.type === 'asset') {
+      result.push(node)
+      continue
+    }
+    const children = pruneEmpty(node.children || [])
+    if (children.length === 0) continue
+    result.push({ ...node, children, count: countAssets(children) })
+  }
+  return result
+}
+
+function nestTree(flat) {
+  const items = (flat || []).map((node, index) => ({
+    id: node.id,
+    parentId: node.parentId || '',
+    name: node.name || node.title || '',
+    type: node.type || 'asset',
+    address: node.address || '',
+    assetId: node.assetId || node.id,
+    uid: `${node.type || 'asset'}:${node.parentId || 'root'}:${node.id}:${index}`,
+    children: []
+  }))
+
+  const nodeMap = new Map()
+  for (const item of items) {
+    if (item.type === 'node') nodeMap.set(item.id, item)
+  }
+
+  const roots = []
+  for (const item of items) {
+    const parent = item.parentId ? nodeMap.get(item.parentId) : null
+    if (parent) parent.children.push(item)
+    else roots.push(item)
+  }
+  return pruneEmpty(roots)
+}
+
+function nodeMatches(node, query) {
+  const name = (node.name || '').toLowerCase()
+  const address = (node.address || '').toLowerCase()
+  const tags = node.type === 'asset'
+    ? appStore.getAssetTags(node.assetId).join(' ').toLowerCase()
+    : ''
+  return name.includes(query) || address.includes(query) || tags.includes(query)
+}
+
+function filterTree(nodes, query) {
+  const result = []
+  for (const node of nodes) {
+    if (node.type === 'asset') {
+      if (nodeMatches(node, query)) result.push(node)
+      continue
+    }
+    const children = filterTree(node.children || [], query)
+    if (nodeMatches(node, query)) {
+      result.push({ ...node, children: children.length ? children : node.children, count: countAssets(children.length ? children : node.children) })
+    } else if (children.length) {
+      result.push({ ...node, children, count: countAssets(children) })
+    }
+  }
+  return result
+}
+
+const nestedTree = computed(() => {
+  const nested = nestTree(appStore.assetTree)
+  if (nested.length) return nested
+  return (appStore.assets || []).map(asset => ({
+    id: asset.id,
+    parentId: '',
+    name: asset.title || asset.address || '未命名',
+    type: 'asset',
+    address: asset.address || '',
+    assetId: asset.id,
+    uid: `asset:root:${asset.id}`,
+    children: []
+  }))
+})
+const isSearching = computed(() => !!searchQuery.value.trim())
+const visibleTree = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return nestedTree.value
+  return filterTree(nestedTree.value, query)
+})
+
+const filteredAssets = computed(() => {
+  const ids = []
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      if (node.type === 'asset') ids.push(node.assetId)
+      else walk(node.children || [])
+    }
+  }
+  walk(visibleTree.value)
+  return [...new Set(ids)]
+})
+
+function toggleNode(id) {
+  expandedIds.value = {
+    ...expandedIds.value,
+    [id]: !expandedIds.value[id]
+  }
+}
+
+function expandRootNodes(flat) {
+  const nodeIds = new Set((flat || []).filter(n => n.type === 'node').map(n => n.id))
+  const next = {}
+  for (const node of flat || []) {
+    if (node.type === 'node' && (!node.parentId || !nodeIds.has(node.parentId))) {
+      next[node.id] = true
+    }
+  }
+  expandedIds.value = next
+}
+
+function openTreeAsset(node) {
+  const asset = appStore.assets.find(a => a.id === node.assetId) || {
+    id: node.assetId,
+    title: node.name,
+    address: node.address,
+    platform_type: 'linux'
+  }
   emit('openAsset', asset)
 }
 
@@ -412,7 +477,8 @@ async function refreshAssets() {
       errorMsg.value = result.error || '获取服务器列表失败'
       return
     }
-    appStore.setAssets(result.assets)
+    appStore.setAssets(result.assets || [], result.tree || [])
+    expandRootNodes(result.tree || [])
   } catch (err) {
     errorMsg.value = `获取列表失败: ${err.message}`
   } finally {
@@ -420,62 +486,13 @@ async function refreshAssets() {
   }
 }
 
-// ==================== 拖拽排序 ====================
-function onDragStart(event, index) {
-  dragIndex.value = index
-  event.dataTransfer.effectAllowed = 'move'
-  event.target.classList.add('dragging')
-}
-
-function onDragOver(event, index) {
-  event.preventDefault()
-  dragOverIndex.value = index
-}
-
-function onDragLeave() {
-  dragOverIndex.value = -1
-}
-
-function onDrop(event, index) {
-  event.preventDefault()
-  if (dragIndex.value === -1 || dragIndex.value === index) return
-
-  const currentList = [...filteredAssets.value]
-  const [movedItem] = currentList.splice(dragIndex.value, 1)
-  currentList.splice(index, 0, movedItem)
-
-  // 更新完整排序
-  const allAssets = appStore.getOrderedAssets()
-  const filteredIds = new Set(filteredAssets.value.map(a => a.id))
-  const nonFiltered = allAssets.filter(a => !filteredIds.has(a.id))
-
-  const newFullOrder = []
-  let filteredIdx = 0
-  let nonFilteredIdx = 0
-
-  for (const a of allAssets) {
-    if (filteredIds.has(a.id)) {
-      newFullOrder.push(currentList[filteredIdx]?.id)
-      filteredIdx++
-    } else {
-      newFullOrder.push(nonFiltered[nonFilteredIdx]?.id)
-      nonFilteredIdx++
-    }
-  }
-
-  appStore.updateAssetOrder(newFullOrder.filter(Boolean))
-  dragOverIndex.value = -1
-}
-
-function onDragEnd(event) {
-  event.target.classList.remove('dragging')
-  dragIndex.value = -1
-  dragOverIndex.value = -1
-}
-
 // ==================== 标签管理 ====================
 function showTagInput(asset) {
-  currentTagAsset.value = asset
+  currentTagAsset.value = {
+    id: asset.assetId || asset.id,
+    title: asset.name || asset.title,
+    address: asset.address
+  }
   newTagValue.value = ''
   showTagModal.value = true
 }

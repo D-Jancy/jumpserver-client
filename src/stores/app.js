@@ -17,6 +17,7 @@ export const useAppStore = defineStore('app', () => {
 
   // ==================== 资产列表 ====================
   const assets = ref([])
+  const assetTree = ref([])
 
   // ==================== 快捷指令 ====================
   // quickCommands: [{ id, name, command, assetId }]
@@ -116,6 +117,7 @@ export const useAppStore = defineStore('app', () => {
     secret.value = ''
     userInfo.value = null
     assets.value = []
+    assetTree.value = []
     assetTags.value = {}
     assetOrder.value = []
     tabs.value = []
@@ -129,8 +131,9 @@ export const useAppStore = defineStore('app', () => {
     userInfo.value = user
   }
 
-  function setAssets(list) {
+  function setAssets(list, tree = []) {
     assets.value = list
+    assetTree.value = Array.isArray(tree) ? tree : []
     if (assetOrder.value.length === 0) {
       assetOrder.value = list.map(a => a.id)
     }
@@ -232,7 +235,7 @@ export const useAppStore = defineStore('app', () => {
     // 配置
     jmsUrl, keyId, secret,
     // 用户 & 资产
-    userInfo, assets, assetTags, assetOrder,
+    userInfo, assets, assetTree, assetTags, assetOrder,
     // Tab 管理
     tabs, activeTabId, activeTab,
     createTab, closeTab, setActiveTab,
