@@ -3,9 +3,11 @@ import { readFileSync, existsSync, rmSync, mkdirSync, copyFileSync, symlinkSync,
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { bundleDir, detectDmgArchSuffix, findMacApp, parseTargetArg } from './mac-arch.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
+const target = parseTargetArg()
 
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
 const tauriConf = JSON.parse(readFileSync(path.join(root, 'src-tauri', 'tauri.conf.json'), 'utf8'))
@@ -13,55 +15,58 @@ const tauriConf = JSON.parse(readFileSync(path.join(root, 'src-tauri', 'tauri.co
 const productName = tauriConf.productName || pkg.name
 const version = tauriConf.version || pkg.version
 const appName = `${productName}.app`
-const dmgName = `${productName}_${version}_aarch64.dmg`
 
-const bundleDir = path.join(root, 'src-tauri', 'target', 'release', 'bundle')
-const appPath = path.join(bundleDir, 'macos', appName)
-const dmgPath = path.join(bundleDir, dmgName)
+const appPath = findMacApp(root, { target, appName })
+if (!appPath) {
+  console.error(target
+    ? `App not found for target ${target}`
+    : `App not found: ${appName}`)
+  console.error('Run "pnpm tauri build --bundles app" first.')
+  console.error('Intel 包请使用: pnpm build:mac:intel')
+  process.exit(1)
+}
+
+const archSuffix = detectDmgArchSuffix(appPath, productName, target)
+const dmgName = `${productName}_${version}_${archSuffix}.dmg`
+const appParentDir = path.dirname(appPath)
+const outputBundleDir = path.basename(appParentDir) === 'macos'
+  ? path.dirname(appParentDir)
+  : bundleDir(root, target)
+const dmgPath = path.join(outputBundleDir, dmgName)
 
 const releaseDir = path.join(root, 'release')
 const releaseAppPath = path.join(releaseDir, appName)
 const releaseDmgPath = path.join(releaseDir, dmgName)
 
-if (!existsSync(appPath)) {
-  console.error(`App not found: ${appPath}`)
-  console.error('Run "pnpm tauri build" first.')
-  process.exit(1)
-}
+console.log(`📦 App: ${appPath}`)
+console.log(`🧱 Arch: ${archSuffix}`)
 
-// ---- 图标修复 ----
 console.log('🔧 修复 macOS 图标...')
 try {
   execSync(`node "${path.join(__dirname, 'fix-mac-icon.mjs')}" "${appPath}"`, { stdio: 'inherit' })
-} catch (e) {
+} catch {
   console.error('⚠️ 图标修复失败，继续打包...')
 }
 
 mkdirSync(releaseDir, { recursive: true })
+mkdirSync(outputBundleDir, { recursive: true })
 
-// 清理 release 目录中旧的同名产物
-for (const target of [releaseAppPath, releaseDmgPath]) {
-  if (existsSync(target)) {
-    rmSync(target, { recursive: true, force: true })
+for (const artifact of [releaseAppPath, releaseDmgPath, dmgPath]) {
+  if (existsSync(artifact)) {
+    rmSync(artifact, { recursive: true, force: true })
   }
 }
 
-if (existsSync(dmgPath)) {
-  rmSync(dmgPath)
-}
-
-const stageDir = path.join(os.tmpdir(), `dmg-stage-${productName}-${Date.now()}`)
+const stageDir = path.join(os.tmpdir(), `dmg-stage-${productName}-${archSuffix}-${Date.now()}`)
 mkdirSync(stageDir, { recursive: true })
 
 try {
-  // 把 .app 复制到暂存目录
   execSync(`ditto "${appPath}" "${path.join(stageDir, appName)}"`, { stdio: 'inherit' })
 
-  // 创建指向系统 Applications 的软链接，Finder 打开 DMG 后会显示"拖到 Applications"入口
   const appsLink = path.join(stageDir, 'Applications')
   try {
-    const target = readlinkSync('/Applications')
-    symlinkSync(target, appsLink)
+    const linkTarget = readlinkSync('/Applications')
+    symlinkSync(linkTarget, appsLink)
   } catch {
     symlinkSync('/Applications', appsLink)
   }
@@ -71,13 +76,11 @@ try {
   execSync(cmd, { stdio: 'inherit' })
   console.log(`Created: ${dmgPath}`)
 
-  // 将 .app 与 .dmg 复制到 release 目录
   console.log('Copying artifacts to release/ ...')
   copyFileSync(dmgPath, releaseDmgPath)
   execSync(`ditto "${appPath}" "${releaseAppPath}"`, { stdio: 'inherit' })
   console.log(`App copied to: ${releaseAppPath}`)
   console.log(`DMG copied to: ${releaseDmgPath}`)
 } finally {
-  // 清理暂存目录
   rmSync(stageDir, { recursive: true, force: true })
 }

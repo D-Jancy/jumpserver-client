@@ -10,40 +10,38 @@
  *   路径 B（仅 Command Line Tools）：iconutil 重生成 .icns + 注入 CFBundleIconName
  *
  * 用法：node scripts/fix-mac-icon.mjs [appPath]
- *   不传 appPath 时自动查找 src-tauri/target/release/bundle/macos/*.app
+ *   不传 appPath 时自动查找当前架构或 --target 对应的 .app
  */
 
 import { execSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, rmSync, copyFileSync, readdirSync,
-  readFileSync, writeFileSync, mkdirSync as fsMkdir
+  existsSync, mkdirSync, rmSync, copyFileSync,
+  readFileSync, writeFileSync
 } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { findMacApp, parseTargetArg } from './mac-arch.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
+const cliArgs = process.argv.slice(2)
+const target = parseTargetArg(cliArgs)
 
 // ---- 查找 .app ----
-let appPath = process.argv[2]
+let appPath = ''
+for (let i = 0; i < cliArgs.length; i++) {
+  if (cliArgs[i] === '--target') {
+    i += 1
+    continue
+  }
+  if (!cliArgs[i].startsWith('--')) {
+    appPath = cliArgs[i]
+    break
+  }
+}
 
 if (!appPath) {
-  const bundleDir = path.join(root, 'src-tauri', 'target', 'release', 'bundle', 'macos')
-  if (!existsSync(bundleDir)) {
-    // 也尝试 release 目录
-    const releaseDir = path.join(root, 'release')
-    if (existsSync(releaseDir)) {
-      const apps = readdirSync(releaseDir).filter(f => f.endsWith('.app'))
-      if (apps.length > 0) {
-        appPath = path.join(releaseDir, apps[0])
-      }
-    }
-  } else {
-    const apps = readdirSync(bundleDir).filter(f => f.endsWith('.app'))
-    if (apps.length > 0) {
-      appPath = path.join(bundleDir, apps[0])
-    }
-  }
+  appPath = findMacApp(root, { target })
 }
 
 if (!appPath || !existsSync(appPath)) {
