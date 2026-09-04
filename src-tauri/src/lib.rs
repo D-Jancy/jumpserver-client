@@ -287,7 +287,12 @@ async fn connect_ssh(
 
     let addr = format!("{}:{}", host, port);
 
-    let config = Arc::new(async_ssh2_russh::russh::client::Config::default());
+    // 定期 keepalive：防止 NAT/防火墙静默断链或服务端超时踢掉空闲会话；
+    // keepalive 失败会终止会话并触发 reader EOF 清理链路，前端状态点同步变灰
+    let config = Arc::new(async_ssh2_russh::russh::client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
     let mut handle = async_ssh2_russh::russh::client::connect(config, addr, NoCheckHandler)
         .await
         .map_err(|e| format!("SSH connect error: {}", e))?;
@@ -628,16 +633,29 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // 应用退出前显式断开所有 SSH 会话，
-            // 让服务端立即清理会话而不是等待 TCP 超时（与 README 描述一致）
-            if let tauri::RunEvent::Exit = event {
-                let state = app_handle.state::<Arc<AppState>>();
-                tauri::async_runtime::block_on(async {
-                    disconnect_all_sessions(&state).await;
-                    // russh 的 disconnect() 仅将断开消息入队，实际 DISCONNECT 包由各会话事件循环异步发出；
-                    // 回调返回后进程随即退出，这里留一小段时间让事件循环完成 flush，否则断开可能来不及送达
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                });
+            match event {
+                // 应用退出前显式断开所有 SSH 会话，
+                // 让服务端立即清理会话而不是等待 TCP 超时（与 README 描述一致）
+                tauri::RunEvent::Exit => {
+                    let state = app_handle.state::<Arc<AppState>>();
+                    tauri::async_runtime::block_on(async {
+                        disconnect_all_sessions(&state).await;
+                        // russh 的 disconnect() 仅将断开消息入队，实际 DISCONNECT 包由各会话事件循环异步发出；
+                        // 回调返回后进程随即退出，这里留一小段时间让事件循环完成 flush，否则断开可能来不及送达
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    });
+                }
+                // macOS 关闭窗口后应用仍驻留：点击 Dock 图标时恢复主窗口，避免用户误以为应用已退出
+                // （has_visible_windows 为 true 时由 macOS 默认行为处理，无需干预）
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+                _ => {}
             }
         });
 }
