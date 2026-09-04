@@ -87,13 +87,6 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function updateTabTitle(tabId, title) {
-    const tab = tabs.value.find(t => t.id === tabId)
-    if (tab) {
-      tab.title = title
-    }
-  }
-
   // ==================== 主题设置 ====================
   const theme = ref('dark') // 'dark' 或 'light'
   const terminalColorScheme = ref('default') // 终端配色方案
@@ -213,10 +206,6 @@ export const useAppStore = defineStore('app', () => {
     saveQuickCommands()
   }
 
-  function getQuickCommandsForAsset(assetId) {
-    return quickCommands.value.filter(c => c.assetId === assetId || !c.assetId)
-  }
-
   async function saveQuickCommands() {
     await window.electronAPI.saveSettings({ quick_commands: quickCommands.value })
   }
@@ -239,7 +228,7 @@ export const useAppStore = defineStore('app', () => {
     // Tab 管理
     tabs, activeTabId, activeTab,
     createTab, closeTab, setActiveTab,
-    setTabConnected, updateTabTitle,
+    setTabConnected,
     // 设置
     setSettings, clearSettings,
     setUserInfo, setAssets,
@@ -251,6 +240,6 @@ export const useAppStore = defineStore('app', () => {
     // 快捷指令
     quickCommands,
     addQuickCommand, updateQuickCommand, removeQuickCommand,
-    getQuickCommandsForAsset, saveQuickCommands
+    saveQuickCommands
   }
 })

@@ -74,7 +74,7 @@
 <script setup>
 import { ref, computed, watch, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useMessage } from 'naive-ui'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -82,7 +82,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { useAppStore } from '../stores/app'
 import TerminalTabBar from './TerminalTabBar.vue'
 import { getColorScheme } from '../styles/terminal-color-schemes'
-import 'xterm/css/xterm.css'
+import '@xterm/xterm/css/xterm.css'
 
 const appStore = useAppStore()
 const message = useMessage()
@@ -346,16 +346,37 @@ function initTerminalForTab(tabId) {
   tryFitWhenReady(tabId, fitAddon)
 }
 
-// 销毁指定 tab 的终端
+// 销毁指定 tab 的终端（即使 xterm 未初始化成功，也要清理所有映射，避免残留）
 function destroyTerminalForTab(tabId) {
+  // 顺带清理未发送的快捷指令排队（若有）
+  clearPendingCommand(tabId)
   const term = terminals.value[tabId]
   if (term) {
     try { term.dispose() } catch (e) { /* ignore */ }
-    delete terminals.value[tabId]
-    delete fitAddons.value[tabId]
-    delete searchAddons.value[tabId]
-    delete searchResultsByTab[tabId]
-    delete terminalRefs.value[tabId]
+  }
+  delete terminals.value[tabId]
+  delete fitAddons.value[tabId]
+  delete searchAddons.value[tabId]
+  delete searchResultsByTab[tabId]
+  delete terminalRefs.value[tabId]
+}
+
+// ==================== 快捷指令排队发送 ====================
+// 绑定资产的快捷指令：等对应 tab 连接成功（ssh-status: connected）后再发送，
+// 替代不可靠的固定延时；连接失败/超时/关闭时清理队列并提示
+const pendingCommands = {}   // tabId -> command
+const pendingTimeouts = {}   // tabId -> 超时兜底 timer
+
+function clearPendingCommand(tabId, reason) {
+  const cmd = pendingCommands[tabId]
+  if (cmd === undefined) return
+  delete pendingCommands[tabId]
+  if (pendingTimeouts[tabId]) {
+    clearTimeout(pendingTimeouts[tabId])
+    delete pendingTimeouts[tabId]
+  }
+  if (reason) {
+    message.warning(`快捷指令「${cmd}」未发送：${reason}`)
   }
 }
 
@@ -378,11 +399,13 @@ async function connectSSHForTab(tabId, asset, cols, rows) {
       if (term) {
         term.writeln(`\r\n\x1b[31m连接失败: ${result.error}\x1b[0m`)
       }
+      clearPendingCommand(tabId)
       return
     }
     appStore.setTabConnected(tabId, true)
   } catch (err) {
     message.error(`连接失败: ${err.message}`)
+    clearPendingCommand(tabId)
   }
 }
 
@@ -392,13 +415,25 @@ function handleSelectTab(tabId) {
 }
 
 function handleCloseTab(tabId) {
-  // 销毁终端
+  // 断开该 tab 的 SSH 连接（TabBar 只负责 emit，关闭逻辑统一在这里收口）
+  window.electronAPI?.disconnectSSH(tabId)?.catch(() => {})
+  // 销毁 xterm 实例并清理映射，避免内存泄漏
   destroyTerminalForTab(tabId)
+  // 从 store 中移除 tab
+  appStore.closeTab(tabId)
 }
 
-// 当用户点击左侧服务器列表时调用
-async function openAssetTab(asset) {
+// 当用户点击左侧服务器列表时调用；command 为快捷指令绑定的命令（可选）
+async function openAssetTab(asset, command = null) {
   const tab = appStore.createTab(asset)
+
+  // 有绑定命令时先排队，连接成功后由 ssh-status 事件触发发送；超时兜底防止无声丢失
+  if (command) {
+    pendingCommands[tab.id] = command
+    pendingTimeouts[tab.id] = setTimeout(() => {
+      clearPendingCommand(tab.id, '连接超时（15 秒未连接成功）')
+    }, 15000)
+  }
 
   await nextTick()
   await nextTick() // 确保 DOM 渲染和 ref 绑定完成
@@ -513,6 +548,12 @@ onMounted(async () => {
           }
         } else if (status === 'connected') {
           appStore.setTabConnected(tabId, true)
+          // 连接成功：立即发送排队的快捷指令（此时后端连接已就绪，不会丢失）
+          const pending = pendingCommands[tabId]
+          if (pending !== undefined) {
+            clearPendingCommand(tabId)
+            window.electronAPI?.sendTerminalData(tabId, pending + '\n')
+          }
         }
       })
     } catch (e) {
