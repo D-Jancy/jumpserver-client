@@ -1,6 +1,6 @@
 {
   "name": "JumpServerClient",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "JumpServer SSH 客户端工具",
   "type": "module",
   "scripts": {
